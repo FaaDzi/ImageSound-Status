@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImageSound</title>
+<meta name="description" content="Checks whether the ImageSound server is online and sends you to it.">
+<meta name="referrer" content="no-referrer">
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #16202a; --muted: #5b6875;
+    --border: #d9e0e6; --accent: #0a7cc2; --ok: #1a8f4c; --off: #b3412f; --wait: #a86f00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1418; --card: #171e24; --text: #e6edf2; --muted: #93a1ad;
+      --border: #26313a; --accent: #4db3f0; --ok: #4cc27f; --off: #ef7a66; --wait: #e2b24a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 28px 24px; text-align: center;
+  }
+  h1 { margin: 0 0 20px; font-size: 1.5rem; letter-spacing: -0.01em; }
+  .status { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--wait); }
+  [data-state="online"] .dot { background: var(--ok); }
+  [data-state="offline"] .dot { background: var(--off); }
+  [data-state="checking"] .dot, [data-state="starting"] .dot { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none !important; } }
+  p.detail { margin: 10px 0 0; color: var(--muted); font-size: .95rem; min-height: 1.5em; }
+  a.enter {
+    display: none; margin-top: 20px; padding: 10px 22px; border-radius: 8px;
+    background: var(--accent); color: #fff; text-decoration: none; font-weight: 600;
+  }
+  [data-state="online"] a.enter { display: inline-block; }
+  a.enter:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main id="app" data-state="checking" aria-live="polite">
+  <h1>ImageSound</h1>
+  <div class="status"><span class="dot" aria-hidden="true"></span><span id="label">Checking server…</span></div>
+  <p class="detail" id="detail"></p>
+  <a class="enter" id="enter" href="#">Enter</a>
+</main>
+<script>
+  // Where run.py publishes the current tunnel URL. Both are public by design:
+  // the gist holds nothing but the URL this page redirects to anyway.
+  const GIST_OWNER = "FaaDzi";
+  const GIST_ID = "PASTE_GIST_ID_HERE";
+  const GIST_FILE = "status.json";
+
+  // Only ever redirect to a Cloudflare quick-tunnel address, so an edited
+  // gist can't send visitors to an arbitrary site.
+  const ALLOWED_URL = /^https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com$/i;
+
+  const HEALTH_RETRY_MS = 10_000;  // server looks down: check again
+  const GIST_REFRESH_MS = 60_000;  // re-read the gist at most this often (API limit: 60/hour/IP)
+
+  const app = document.getElementById("app");
+  const label = document.getElementById("label");
+  const detail = document.getElementById("detail");
+  const enter = document.getElementById("enter");
+
+  function show(state, text, sub = "") {
+    app.dataset.state = state;
+    label.textContent = text;
+    detail.textContent = sub;
+  }
+
+  async function fetchJson(url, ms = 8000) {
+    const res = await fetch(url, { cache: "no-cache", signal: AbortSignal.timeout(ms) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function readStatus() {
+    try {
+      // The API reflects edits within seconds; 304 revalidations don't count
+      // against the rate limit.
+      const gist = await fetchJson(`https://api.github.com/gists/${GIST_ID}`);
+      return JSON.parse(gist.files[GIST_FILE].content);
+    } catch {
+      // Rate-limited or API down: the raw CDN copy can be a few minutes stale.
+      return fetchJson(`https://gist.githubusercontent.com/${GIST_OWNER}/${GIST_ID}/raw/${GIST_FILE}?t=${Date.now()}`);
+    }
+  }
+
+  async function isHealthy(base) {
+    try {
+      const body = await fetchJson(`${base}/api/health`, 6000);
+      return body.status === "ok";
+    } catch {
+      return false;  // DNS gone, tunnel 530, backend down (no CORS header) all land here
+    }
+  }
+
+  let status = null;
+  let statusReadAt = 0;
+
+  async function tick() {
+    if (!status || Date.now() - statusReadAt > GIST_REFRESH_MS) {
+      try {
+        status = await readStatus();
+        statusReadAt = Date.now();
+      } catch {
+        show("offline", "Can't reach the status record", "Retrying shortly…");
+        return setTimeout(tick, HEALTH_RETRY_MS);
+      }
+    }
+
+    const url = typeof status.url === "string" ? status.url.replace(/\/+$/, "") : "";
+    if (!status.online || !ALLOWED_URL.test(url)) {
+      show("offline", "Server is offline", "It'll show up here when it's back. This page checks again automatically.");
+      return setTimeout(tick, GIST_REFRESH_MS);
+    }
+
+    if (await isHealthy(url)) {
+      const target = `${url}/login`;
+      enter.href = target;
+      show("online", "Server is online", "Taking you there…");
+      return setTimeout(() => location.replace(target), 1200);
+    }
+
+    show("starting", "Server is starting or unreachable", "Checking again every few seconds…");
+    setTimeout(tick, HEALTH_RETRY_MS);
+  }
+
+  if (GIST_ID === "PASTE_GIST_ID_HERE") {
+    show("offline", "Not configured", "Set GIST_ID in index.html.");
+  } else {
+    tick();
+  }
+</script>
+</body>
+</html>
